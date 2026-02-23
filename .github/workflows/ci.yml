@@ -1,0 +1,19 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  ci:
+    name: ci
+    uses: Vaultody-com/.github/.github/workflows/node-ci-reusable.yml@main
+    with:
+      node_version: "20"
+      install_command: "ci"
+      lint_command: "lint"
+      unit_command: "test:unit"
+      integration_command: "test:integration"
+      build_command: "build"
