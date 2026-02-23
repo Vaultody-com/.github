@@ -1,0 +1,241 @@
+name: Bulk Workflow Rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_list:
+        description: 'Comma-separated repo names (e.g. repo-a,repo-b) or ALL for entire org'
+        required: true
+        default: 'ALL'
+
+jobs:
+  rollout:
+    name: Rollout Standardized Workflows
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+      ORG: Vaultody-com
+      BRANCH: chore/standardize-workflows
+      COMMIT_MSG: 'Standardize workflows (centralized architecture)'
+
+    steps:
+      - name: Checkout .github repo (to read templates)
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.ORG_ADMIN_TOKEN }}
+
+      - name: Read template files
+        id: templates
+        run: |
+          # project-sync.yml — copy verbatim from templates/
+          PROJECT_SYNC_CONTENT=$(cat templates/project-sync.yml)
+          echo "project_sync_b64=$(echo "${PROJECT_SYNC_CONTENT}" | base64 -w0)" >> "${GITHUB_OUTPUT}"
+
+          # ci.yml — caller template pointing to reusable CI engine
+          CI_CONTENT=$(cat << 'EOCI'
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  ci:
+    uses: Vaultody-com/.github/.github/workflows/node-ci-reusable.yml@main
+    secrets: inherit
+EOCI
+)
+          echo "ci_b64=$(echo "${CI_CONTENT}" | base64 -w0)" >> "${GITHUB_OUTPUT}"
+
+      - name: Build repo list
+        id: repos
+        run: |
+          INPUT="${{ github.event.inputs.repo_list }}"
+          if [ "${INPUT}" = "ALL" ]; then
+            echo "==> Fetching all non-archived repos in ${ORG}..."
+            REPOS=$(gh api --paginate "orgs/${ORG}/repos" \
+              --jq '.[] | select(.archived == false) | .name' | tr '\n' ',')
+          else
+            REPOS="${INPUT},"
+          fi
+          echo "repos=${REPOS}" >> "${GITHUB_OUTPUT}"
+          echo "==> Target repos: ${REPOS}"
+
+      - name: Rollout to each repo
+        run: |
+          set +e  # continue on errors
+
+          CI_CONTENT=$(echo "${{ steps.templates.outputs.ci_b64 }}" | base64 -d)
+          PROJECT_SYNC_CONTENT=$(echo "${{ steps.templates.outputs.project_sync_b64 }}" | base64 -d)
+
+          SUCCESS_COUNT=0
+          SKIP_COUNT=0
+          FAIL_COUNT=0
+          FAILED_REPOS=""
+
+          IFS=',' read -ra REPO_ARRAY <<< "${{ steps.repos.outputs.repos }}"
+
+          for REPO_NAME in "${REPO_ARRAY[@]}"; do
+            # Strip whitespace
+            REPO_NAME=$(echo "${REPO_NAME}" | tr -d '[:space:]')
+            [ -z "${REPO_NAME}" ] && continue
+
+            FULL_REPO="${ORG}/${REPO_NAME}"
+            echo ""
+            echo "======================================"
+            echo "Processing: ${FULL_REPO}"
+            echo "======================================"
+
+            # Skip .github itself — it holds the reusable workflows, not callers
+            if [ "${REPO_NAME}" = ".github" ]; then
+              echo "SKIP: .github is the central workflows repo — skipping"
+              SKIP_COUNT=$((SKIP_COUNT + 1))
+              continue
+            fi
+
+            # Verify repo exists and is not archived
+            REPO_META=$(gh api "repos/${FULL_REPO}" 2>/dev/null)
+            if [ $? -ne 0 ]; then
+              echo "FAIL: Could not access ${FULL_REPO} — skipping"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              FAILED_REPOS="${FAILED_REPOS} ${REPO_NAME}"
+              continue
+            fi
+
+            IS_ARCHIVED=$(echo "${REPO_META}" | jq -r '.archived')
+            if [ "${IS_ARCHIVED}" = "true" ]; then
+              echo "SKIP: ${FULL_REPO} is archived — skipping"
+              SKIP_COUNT=$((SKIP_COUNT + 1))
+              continue
+            fi
+
+            DEFAULT_BRANCH=$(echo "${REPO_META}" | jq -r '.default_branch')
+            echo "Default branch: ${DEFAULT_BRANCH}"
+
+            # Get latest commit SHA of default branch
+            BASE_SHA=$(gh api "repos/${FULL_REPO}/git/ref/heads/${DEFAULT_BRANCH}" \
+              --jq '.object.sha' 2>/dev/null)
+            if [ -z "${BASE_SHA}" ]; then
+              echo "FAIL: Could not get base SHA for ${FULL_REPO}"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              FAILED_REPOS="${FAILED_REPOS} ${REPO_NAME}"
+              continue
+            fi
+            echo "Base SHA: ${BASE_SHA}"
+
+            # Create or reset the rollout branch
+            BRANCH_EXISTS=$(gh api "repos/${FULL_REPO}/git/ref/heads/${BRANCH}" 2>/dev/null | jq -r '.ref // empty')
+            if [ -n "${BRANCH_EXISTS}" ]; then
+              echo "Branch ${BRANCH} exists — force-updating to base"
+              gh api "repos/${FULL_REPO}/git/refs/heads/${BRANCH}" \
+                --method PATCH \
+                --field sha="${BASE_SHA}" \
+                --field force=true > /dev/null 2>&1
+            else
+              echo "Creating branch ${BRANCH}"
+              gh api "repos/${FULL_REPO}/git/refs" \
+                --method POST \
+                --field ref="refs/heads/${BRANCH}" \
+                --field sha="${BASE_SHA}" > /dev/null 2>&1
+            fi
+            if [ $? -ne 0 ]; then
+              echo "FAIL: Could not create/update branch in ${FULL_REPO}"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              FAILED_REPOS="${FAILED_REPOS} ${REPO_NAME}"
+              continue
+            fi
+
+            # Helper: upsert a file via Contents API (create or update)
+            upsert_file() {
+              local FILE_PATH="$1"
+              local FILE_CONTENT_B64="$2"
+              local MSG="$3"
+
+              # Get current SHA if file exists (needed for update)
+              EXISTING_SHA=$(gh api "repos/${FULL_REPO}/contents/${FILE_PATH}?ref=${BRANCH}" \
+                --jq '.sha // empty' 2>/dev/null)
+
+              if [ -n "${EXISTING_SHA}" ]; then
+                echo "  Updating ${FILE_PATH} (sha: ${EXISTING_SHA})"
+                gh api "repos/${FULL_REPO}/contents/${FILE_PATH}" \
+                  --method PUT \
+                  --field message="${MSG}" \
+                  --field content="${FILE_CONTENT_B64}" \
+                  --field sha="${EXISTING_SHA}" \
+                  --field branch="${BRANCH}" > /dev/null 2>&1
+              else
+                echo "  Creating ${FILE_PATH}"
+                gh api "repos/${FULL_REPO}/contents/${FILE_PATH}" \
+                  --method PUT \
+                  --field message="${MSG}" \
+                  --field content="${FILE_CONTENT_B64}" \
+                  --field branch="${BRANCH}" > /dev/null 2>&1
+              fi
+              return $?
+            }
+
+            CI_B64=$(echo "${CI_CONTENT}" | base64 -w0)
+            PROJECT_SYNC_B64=$(echo "${PROJECT_SYNC_CONTENT}" | base64 -w0)
+
+            # Upsert .github/workflows/ci.yml
+            upsert_file ".github/workflows/ci.yml" "${CI_B64}" "${COMMIT_MSG}"
+            CI_RESULT=$?
+
+            # Upsert .github/workflows/project-sync.yml
+            upsert_file ".github/workflows/project-sync.yml" "${PROJECT_SYNC_B64}" "${COMMIT_MSG}"
+            PS_RESULT=$?
+
+            if [ $CI_RESULT -ne 0 ] || [ $PS_RESULT -ne 0 ]; then
+              echo "FAIL: Could not upsert workflow files in ${FULL_REPO}"
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              FAILED_REPOS="${FAILED_REPOS} ${REPO_NAME}"
+              continue
+            fi
+
+            # Open PR (skip if already exists)
+            EXISTING_PR=$(gh pr list --repo "${FULL_REPO}" --head "${BRANCH}" --json number --jq '.[0].number' 2>/dev/null)
+            if [ -n "${EXISTING_PR}" ]; then
+              echo "PR already exists: #${EXISTING_PR} — skipping PR creation"
+            else
+              PR_URL=$(gh pr create \
+                --repo "${FULL_REPO}" \
+                --head "${BRANCH}" \
+                --base "${DEFAULT_BRANCH}" \
+                --title "Standardize workflows (centralized architecture)" \
+                --body "## Workflow Standardization
+
+This PR was automatically created by the bulk rollout workflow.
+
+### Changes
+- `.github/workflows/ci.yml` — Calls the centralized CI engine at `Vaultody-com/.github/.github/workflows/node-ci-reusable.yml@main`
+- `.github/workflows/project-sync.yml` — Calls the centralized project sync engine for GitHub Projects v2 board automation
+
+### Architecture
+All workflow logic lives in `Vaultody-com/.github`. These files are thin callers only.
+
+/cc @nashwan-vaultody" 2>&1)
+              echo "PR created: ${PR_URL}"
+            fi
+
+            echo "SUCCESS: ${FULL_REPO}"
+            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+          done
+
+          echo ""
+          echo "======================================"
+          echo "ROLLOUT SUMMARY"
+          echo "======================================"
+          echo "SUCCESS: ${SUCCESS_COUNT} repos"
+          echo "SKIPPED: ${SKIP_COUNT} repos"
+          echo "FAILED:  ${FAIL_COUNT} repos"
+          if [ -n "${FAILED_REPOS}" ]; then
+            echo "Failed repos:${FAILED_REPOS}"
+          fi
+
+          # Fail the job if any repos hard-failed
+          if [ ${FAIL_COUNT} -gt 0 ]; then
+            echo ""
+            echo "WARNING: ${FAIL_COUNT} repo(s) failed. Review logs above."
+            exit 1
+          fi
