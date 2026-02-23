@@ -1,0 +1,176 @@
+name: Agent Developer (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: 'Target repository (owner/repo)'
+        type: string
+        required: true
+      issue_number:
+        description: 'Issue number to implement'
+        type: string
+        required: true
+      base_branch:
+        description: 'Base branch to branch from'
+        type: string
+        default: 'main'
+    secrets:
+      ORG_ADMIN_TOKEN:
+        required: true
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  developer-agent:
+    name: Developer Agent — Implement Issue
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      REPO: ${{ inputs.repo }}
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      BASE_BRANCH: ${{ inputs.base_branch }}
+      FEATURE_BRANCH: feature/issue-${{ inputs.issue_number }}
+
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          token: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+
+      - name: Checkout agent-prompts from .github repo
+        uses: actions/checkout@v4
+        with:
+          repository: Vaultody-com/.github
+          token: ${{ secrets.ORG_ADMIN_TOKEN }}
+          path: .agent-system
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Retrieve issue details
+        id: issue
+        run: |
+          REPO_OWNER=$(echo "${REPO}" | cut -d'/' -f1)
+          REPO_NAME=$(echo "${REPO}" | cut -d'/' -f2)
+
+          ISSUE_DATA=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}")
+          ISSUE_TITLE=$(echo "${ISSUE_DATA}" | jq -r '.title')
+          ISSUE_BODY=$(echo "${ISSUE_DATA}" | jq -r '.body // ""')
+
+          echo "title=${ISSUE_TITLE}" >> "${GITHUB_OUTPUT}"
+          echo "ISSUE_TITLE=${ISSUE_TITLE}" >> "${GITHUB_ENV}"
+
+          # Write full issue body to file to avoid shell escaping issues
+          echo "${ISSUE_BODY}" > /tmp/issue-body.txt
+          echo "Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+
+      - name: Build repository tree
+        run: |
+          find . -type f \
+            -not -path './.git/*' \
+            -not -path './node_modules/*' \
+            -not -path './.agent-system/*' \
+            | sort > /tmp/repo-tree.txt
+          echo "Repository tree written ($(wc -l < /tmp/repo-tree.txt) files)"
+
+      - name: Create or reset feature branch
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          if git ls-remote --exit-code --heads origin "${FEATURE_BRANCH}"; then
+            git checkout "${FEATURE_BRANCH}"
+            git reset --hard "origin/${BASE_BRANCH}"
+          else
+            git checkout -b "${FEATURE_BRANCH}"
+          fi
+
+      - name: Run Developer Agent (Claude Code)
+        run: |
+          ISSUE_BODY=$(cat /tmp/issue-body.txt)
+          REPO_TREE=$(cat /tmp/repo-tree.txt)
+
+          claude -p .agent-system/agent-prompts/developer.md \
+            --input "ISSUE_NUMBER=${ISSUE_NUMBER}
+ISSUE_TITLE=${ISSUE_TITLE}
+REPO=${REPO}
+FEATURE_BRANCH=${FEATURE_BRANCH}
+BASE_BRANCH=${BASE_BRANCH}
+
+ISSUE BODY:
+${ISSUE_BODY}
+
+REPOSITORY FILE TREE:
+${REPO_TREE}" \
+            --output /tmp/developer-report.txt
+
+          echo "=== Developer Agent Output ==="
+          cat /tmp/developer-report.txt
+
+      - name: Enforce path boundaries (src/** only)
+        run: |
+          UNAUTHORIZED=$(git diff --name-only HEAD | grep -vE '^src/' || true)
+          if [ -n "${UNAUTHORIZED}" ]; then
+            echo "FAIL: Unauthorized files modified outside src/:"
+            echo "${UNAUTHORIZED}"
+            exit 1
+          fi
+          echo "Path boundary check: PASS (only src/** modified)"
+
+      - name: Commit and push feature branch
+        run: |
+          git add src/
+          if git diff --cached --quiet; then
+            echo "No changes to commit — agent made no modifications"
+            exit 1
+          fi
+          git commit -m "feat(#${ISSUE_NUMBER}): implement ${ISSUE_TITLE}"
+          git push origin "${FEATURE_BRANCH}"
+
+      - name: Open Pull Request
+        id: pr
+        run: |
+          DEVELOPER_REPORT=$(cat /tmp/developer-report.txt)
+          EXISTING_PR=$(gh pr list --repo "${REPO}" --head "${FEATURE_BRANCH}" --json number --jq '.[0].number' 2>/dev/null)
+          if [ -n "${EXISTING_PR}" ]; then
+            echo "PR already exists: #${EXISTING_PR}"
+            echo "pr_number=${EXISTING_PR}" >> "${GITHUB_OUTPUT}"
+          else
+            PR_URL=$(gh pr create \
+              --repo "${REPO}" \
+              --head "${FEATURE_BRANCH}" \
+              --base "${BASE_BRANCH}" \
+              --title "Implement issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
+              --body "Fixes #${ISSUE_NUMBER}
+
+## Developer Agent Report
+
+$(cat /tmp/developer-report.txt)")
+            echo "PR created: ${PR_URL}"
+            PR_NUMBER=$(echo "${PR_URL}" | grep -oE '[0-9]+$')
+            echo "pr_number=${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Post agent report as PR comment
+        run: |
+          PR_NUMBER=${{ steps.pr.outputs.pr_number }}
+          if [ -n "${PR_NUMBER}" ]; then
+            gh pr comment "${PR_NUMBER}" \
+              --repo "${REPO}" \
+              --body "## Developer Agent Report
+
+$(cat /tmp/developer-report.txt)"
+          fi
