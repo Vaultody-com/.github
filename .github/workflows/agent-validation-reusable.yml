@@ -1,0 +1,262 @@
+name: Agent Validation (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: 'Target repository (owner/repo)'
+        type: string
+        required: true
+      issue_number:
+        description: 'Issue number'
+        type: string
+        required: true
+      pr_number:
+        description: 'PR number to comment on'
+        type: string
+        required: true
+      mode:
+        description: 'Validation mode: review | qa | perf'
+        type: string
+        required: true
+    secrets:
+      ORG_ADMIN_TOKEN:
+        required: true
+      ANTHROPIC_API_KEY:
+        required: true
+
+jobs:
+  validation-agent:
+    name: Validation Agent — ${{ inputs.mode }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      REPO: ${{ inputs.repo }}
+      ISSUE_NUMBER: ${{ inputs.issue_number }}
+      PR_NUMBER: ${{ inputs.pr_number }}
+      MODE: ${{ inputs.mode }}
+      FEATURE_BRANCH: feature/issue-${{ inputs.issue_number }}
+
+    steps:
+      - name: Validate mode input
+        run: |
+          if [ "${MODE}" != "review" ] && [ "${MODE}" != "qa" ] && [ "${MODE}" != "perf" ]; then
+            echo "FAIL: Invalid mode '${MODE}'. Must be 'review', 'qa', or 'perf'."
+            exit 1
+          fi
+          echo "Validation mode: ${MODE}"
+
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.repo }}
+          token: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ref: feature/issue-${{ inputs.issue_number }}
+          fetch-depth: 0
+
+      - name: Checkout agent-prompts from .github repo
+        uses: actions/checkout@v4
+        with:
+          repository: Vaultody-com/.github
+          token: ${{ secrets.ORG_ADMIN_TOKEN }}
+          path: .agent-system
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Retrieve issue and PR details
+        run: |
+          ISSUE_DATA=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}")
+          echo "ISSUE_TITLE=$(echo "${ISSUE_DATA}" | jq -r '.title')" >> "${GITHUB_ENV}"
+          echo "${ISSUE_DATA}" | jq -r '.body // ""' > /tmp/issue-body.txt
+
+          # Get PR diff summary
+          gh api "repos/${REPO}/pulls/${PR_NUMBER}/files" \
+            --jq '[.[] | {filename, status, additions, deletions}]' > /tmp/pr-files.json
+
+          # Get existing PR comments for context
+          gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --jq '[.[] | {user: .user.login, body: .body}]' > /tmp/pr-comments.json
+
+          echo "Issue and PR details retrieved"
+
+      # ── REVIEW MODE ──────────────────────────────────────────────────────────
+      - name: Run Reviewer Agent (Claude Code)
+        if: inputs.mode == 'review'
+        run: |
+          ISSUE_BODY=$(cat /tmp/issue-body.txt)
+          PR_FILES=$(cat /tmp/pr-files.json)
+          PR_COMMENTS=$(cat /tmp/pr-comments.json)
+
+          claude -p .agent-system/agent-prompts/reviewer.md \
+            --input "ISSUE_NUMBER=${ISSUE_NUMBER}
+ISSUE_TITLE=${ISSUE_TITLE}
+REPO=${REPO}
+FEATURE_BRANCH=${FEATURE_BRANCH}
+PR_NUMBER=${PR_NUMBER}
+MODE=review
+
+ISSUE BODY:
+${ISSUE_BODY}
+
+PR CHANGED FILES:
+${PR_FILES}
+
+EXISTING PR COMMENTS (agent reports):
+${PR_COMMENTS}" \
+            --output /tmp/validation-report.txt
+
+          echo "=== Reviewer Agent Output ==="
+          cat /tmp/validation-report.txt
+
+          # Block merge if CHANGES_REQUESTED
+          if grep -q "Decision: CHANGES_REQUESTED" /tmp/validation-report.txt; then
+            echo "REVIEWER_DECISION=CHANGES_REQUESTED" >> "${GITHUB_ENV}"
+          else
+            echo "REVIEWER_DECISION=APPROVED" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Post review comment and request changes if needed
+        if: inputs.mode == 'review'
+        run: |
+          gh pr comment "${PR_NUMBER}" \
+            --repo "${REPO}" \
+            --body "## Code Review Agent Report
+
+$(cat /tmp/validation-report.txt)"
+
+          if [ "${REVIEWER_DECISION}" = "CHANGES_REQUESTED" ]; then
+            echo "Reviewer requested changes — failing step to block pipeline"
+            exit 1
+          fi
+
+      # ── QA MODE ──────────────────────────────────────────────────────────────
+      - name: Run QA Manual Agent (Claude Code)
+        if: inputs.mode == 'qa'
+        run: |
+          ISSUE_BODY=$(cat /tmp/issue-body.txt)
+          PR_COMMENTS=$(cat /tmp/pr-comments.json)
+
+          claude -p .agent-system/agent-prompts/qa-manual.md \
+            --input "ISSUE_NUMBER=${ISSUE_NUMBER}
+ISSUE_TITLE=${ISSUE_TITLE}
+REPO=${REPO}
+FEATURE_BRANCH=${FEATURE_BRANCH}
+PR_NUMBER=${PR_NUMBER}
+MODE=qa
+
+ISSUE BODY:
+${ISSUE_BODY}
+
+ALL AGENT REPORTS (from PR comments):
+${PR_COMMENTS}" \
+            --output /tmp/validation-report.txt
+
+          echo "=== QA Manual Agent Output ==="
+          cat /tmp/validation-report.txt
+
+          # Fail if QA FAIL declared
+          if grep -q "Overall QA Decision: FAIL" /tmp/validation-report.txt; then
+            echo "QA_DECISION=FAIL" >> "${GITHUB_ENV}"
+          else
+            echo "QA_DECISION=PASS" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Post QA report comment
+        if: inputs.mode == 'qa'
+        run: |
+          gh pr comment "${PR_NUMBER}" \
+            --repo "${REPO}" \
+            --body "## QA Manual Agent Report
+
+$(cat /tmp/validation-report.txt)"
+
+          if [ "${QA_DECISION}" = "FAIL" ]; then
+            echo "QA declared FAIL — failing step to block pipeline"
+            exit 1
+          fi
+
+      # ── PERFORMANCE MODE ─────────────────────────────────────────────────────
+      - name: Check for performance criteria
+        if: inputs.mode == 'perf'
+        id: perf-check
+        run: |
+          ISSUE_BODY=$(cat /tmp/issue-body.txt)
+          # Look for common performance keywords in the issue
+          if echo "${ISSUE_BODY}" | grep -iE "(latency|throughput|response time|ms|req/s|requests per second|p95|p99|performance)" > /dev/null 2>&1; then
+            echo "has_perf_criteria=true" >> "${GITHUB_OUTPUT}"
+            echo "Performance criteria detected in issue"
+          else
+            echo "has_perf_criteria=false" >> "${GITHUB_OUTPUT}"
+            echo "No performance criteria detected — will SKIP"
+          fi
+
+      - name: Run Performance Agent (Claude Code)
+        if: inputs.mode == 'perf' && steps.perf-check.outputs.has_perf_criteria == 'true'
+        run: |
+          ISSUE_BODY=$(cat /tmp/issue-body.txt)
+
+          claude -p .agent-system/agent-prompts/performance.md \
+            --input "ISSUE_NUMBER=${ISSUE_NUMBER}
+ISSUE_TITLE=${ISSUE_TITLE}
+REPO=${REPO}
+FEATURE_BRANCH=${FEATURE_BRANCH}
+PR_NUMBER=${PR_NUMBER}
+MODE=perf
+
+ISSUE BODY:
+${ISSUE_BODY}" \
+            --output /tmp/validation-report.txt
+
+          echo "=== Performance Agent Output ==="
+          cat /tmp/validation-report.txt
+
+          # Verify no production files modified
+          SRC_MODIFIED=$(git diff --name-only HEAD | grep '^src/' || true)
+          if [ -n "${SRC_MODIFIED}" ]; then
+            echo "FAIL: Performance agent modified production files — PROHIBITED"
+            exit 1
+          fi
+
+          # Fail if performance FAIL declared
+          if grep -q "Status: FAIL" /tmp/validation-report.txt; then
+            echo "PERF_DECISION=FAIL" >> "${GITHUB_ENV}"
+          else
+            echo "PERF_DECISION=PASS" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Post performance SKIP comment
+        if: inputs.mode == 'perf' && steps.perf-check.outputs.has_perf_criteria == 'false'
+        run: |
+          gh pr comment "${PR_NUMBER}" \
+            --repo "${REPO}" \
+            --body "## Performance Agent Report
+
+Status: SKIP
+
+No performance criteria detected in issue #${ISSUE_NUMBER}. Performance validation skipped."
+          echo "Performance validation skipped — no criteria in issue"
+
+      - name: Post performance report comment
+        if: inputs.mode == 'perf' && steps.perf-check.outputs.has_perf_criteria == 'true'
+        run: |
+          gh pr comment "${PR_NUMBER}" \
+            --repo "${REPO}" \
+            --body "## Performance Agent Report
+
+$(cat /tmp/validation-report.txt)"
+
+          if [ "${PERF_DECISION}" = "FAIL" ]; then
+            echo "Performance criteria not met — failing step to block pipeline"
+            exit 1
+          fi
