@@ -1,0 +1,174 @@
+name: Project Sync (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      org:
+        description: 'GitHub organization name'
+        type: string
+        default: 'Vaultody-com'
+      project_title:
+        description: 'GitHub Project title to sync with'
+        type: string
+        default: 'AI Dev Pipeline'
+      repo:
+        description: 'Repository name (owner/repo format)'
+        type: string
+        required: true
+      target_status:
+        description: 'Target status column name'
+        type: string
+        required: true
+      issue_number:
+        description: 'Issue or PR number to move'
+        type: string
+        required: true
+    secrets:
+      ORG_ADMIN_TOKEN:
+        required: true
+
+jobs:
+  sync-project:
+    name: Sync to Project Board
+    runs-on: ubuntu-latest
+    steps:
+      - name: Move issue/PR to project status
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ORG: ${{ inputs.org }}
+          PROJECT_TITLE: ${{ inputs.project_title }}
+          REPO: ${{ inputs.repo }}
+          TARGET_STATUS: ${{ inputs.target_status }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+
+          echo "==> Finding project: ${PROJECT_TITLE} in org: ${ORG}"
+
+          # Step 1: Find project ID by title (dynamic — no hardcoded IDs)
+          PROJECT_DATA=$(gh api graphql -f query='
+            query($org: String!) {
+              organization(login: $org) {
+                projectsV2(first: 20) {
+                  nodes {
+                    id
+                    title
+                    number
+                  }
+                }
+              }
+            }
+          ' -f org="${ORG}")
+
+          PROJECT_ID=$(echo "${PROJECT_DATA}" | jq -r --arg title "${PROJECT_TITLE}"             '.data.organization.projectsV2.nodes[] | select(.title == $title) | .id')
+
+          if [ -z "${PROJECT_ID}" ]; then
+            echo "ERROR: Project '${PROJECT_TITLE}' not found in org '${ORG}'"
+            exit 1
+          fi
+          echo "==> Project ID: ${PROJECT_ID}"
+
+          # Step 2: Find Status field ID and option IDs (dynamic)
+          FIELD_DATA=$(gh api graphql -f query='
+            query($projectId: ID!) {
+              node(id: $projectId) {
+                ... on ProjectV2 {
+                  fields(first: 20) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        name
+                        options {
+                          id
+                          name
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ' -f projectId="${PROJECT_ID}")
+
+          STATUS_FIELD_ID=$(echo "${FIELD_DATA}" | jq -r '.data.node.fields.nodes[] | select(.name == "Status") | .id')
+          STATUS_OPTION_ID=$(echo "${FIELD_DATA}" | jq -r --arg status "${TARGET_STATUS}"             '.data.node.fields.nodes[] | select(.name == "Status") | .options[] | select(.name == $status) | .id')
+
+          if [ -z "${STATUS_FIELD_ID}" ]; then
+            echo "ERROR: Status field not found in project"
+            exit 1
+          fi
+          if [ -z "${STATUS_OPTION_ID}" ]; then
+            echo "ERROR: Status option '${TARGET_STATUS}' not found. Valid options:"
+            echo "${FIELD_DATA}" | jq -r '.data.node.fields.nodes[] | select(.name == "Status") | .options[].name'
+            exit 1
+          fi
+          echo "==> Status field ID: ${STATUS_FIELD_ID}"
+          echo "==> Status option ID for '${TARGET_STATUS}': ${STATUS_OPTION_ID}"
+
+          # Step 3: Get the issue/PR node ID from the repo
+          REPO_OWNER=$(echo "${REPO}" | cut -d'/' -f1)
+          REPO_NAME=$(echo "${REPO}" | cut -d'/' -f2)
+
+          CONTENT_DATA=$(gh api graphql -f query='
+            query($owner: String!, $repo: String!, $number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                issueOrPullRequest(number: $number) {
+                  ... on Issue {
+                    id
+                    title
+                  }
+                  ... on PullRequest {
+                    id
+                    title
+                  }
+                }
+              }
+            }
+          ' -f owner="${REPO_OWNER}" -f repo="${REPO_NAME}" -F number="${ISSUE_NUMBER}")
+
+          CONTENT_ID=$(echo "${CONTENT_DATA}" | jq -r '.data.repository.issueOrPullRequest.id')
+          CONTENT_TITLE=$(echo "${CONTENT_DATA}" | jq -r '.data.repository.issueOrPullRequest.title')
+
+          if [ -z "${CONTENT_ID}" ] || [ "${CONTENT_ID}" = "null" ]; then
+            echo "ERROR: Issue/PR #${ISSUE_NUMBER} not found in ${REPO}"
+            exit 1
+          fi
+          echo "==> Content: '${CONTENT_TITLE}' (ID: ${CONTENT_ID})"
+
+          # Step 4: Add item to project (idempotent — returns existing item if already added)
+          ADD_RESULT=$(gh api graphql -f query='
+            mutation($projectId: ID!, $contentId: ID!) {
+              addProjectV2ItemById(input: { projectId: $projectId, contentId: $contentId }) {
+                item {
+                  id
+                }
+              }
+            }
+          ' -f projectId="${PROJECT_ID}" -f contentId="${CONTENT_ID}")
+
+          ITEM_ID=$(echo "${ADD_RESULT}" | jq -r '.data.addProjectV2ItemById.item.id')
+
+          if [ -z "${ITEM_ID}" ] || [ "${ITEM_ID}" = "null" ]; then
+            echo "ERROR: Failed to add item to project"
+            echo "${ADD_RESULT}"
+            exit 1
+          fi
+          echo "==> Project item ID: ${ITEM_ID}"
+
+          # Step 5: Update Status field to target status
+          gh api graphql -f query='
+            mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: $projectId,
+                itemId: $itemId,
+                fieldId: $fieldId,
+                value: { singleSelectOptionId: $optionId }
+              }) {
+                projectV2Item {
+                  id
+                }
+              }
+            }
+          ' -f projectId="${PROJECT_ID}" -f itemId="${ITEM_ID}" -f fieldId="${STATUS_FIELD_ID}" -f optionId="${STATUS_OPTION_ID}"
+
+          echo "==> Successfully moved #${ISSUE_NUMBER} to '${TARGET_STATUS}' in project '${PROJECT_TITLE}'"
