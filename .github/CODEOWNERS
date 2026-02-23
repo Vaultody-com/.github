@@ -1,0 +1,21 @@
+# CODEOWNERS - Default code owners for all repositories in the Vaultody-com organization
+# This file defines who is responsible for reviewing and approving changes
+# Syntax: <pattern> <owner1> <owner2> ...
+
+# Default owners for all files
+* @Vaultody-com/team-leaders
+
+# Source code - requires developer review
+/src/ @Vaultody-com/developers @Vaultody-com/team-leaders
+
+# CI/CD configuration - requires team leader approval
+/.github/ @Vaultody-com/team-leaders
+
+# Test files - requires QA review
+/test/ @Vaultody-com/qa @Vaultody-com/team-leaders
+/tests/ @Vaultody-com/qa @Vaultody-com/team-leaders
+/spec/ @Vaultody-com/qa @Vaultody-com/team-leaders
+
+# Documentation
+/docs/ @Vaultody-com/team-leaders
+*.md @Vaultody-com/team-leaders
