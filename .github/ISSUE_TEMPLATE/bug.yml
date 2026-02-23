@@ -1,0 +1,72 @@
+name: Bug Report
+description: Template for reporting bugs
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of the bug
+      placeholder: "Describe what happened and what you expected to happen"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Go to ...
+        2. Click on ...
+        3. See error
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen
+      placeholder: "A clear description of what you expected to happen"
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened
+      placeholder: "A clear description of what actually happened"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Relevant environment information
+      placeholder: |
+        - OS: [e.g. Ubuntu 22.04]
+        - Node.js version: [e.g. 18.x]
+        - Package version: [e.g. 1.0.0]
+  - type: dropdown
+    id: service-framework
+    attributes:
+      label: Service Framework
+      options:
+        - NestJS
+        - Fastify
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: agent-owner
+    attributes:
+      label: Agent Owner
+      options:
+        - Developer
+        - Unit
+        - Integration
+        - Performance
+        - Reviewer
+        - QA
+        - Team Leader
+    validations:
+      required: true
