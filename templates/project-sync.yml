@@ -1,0 +1,172 @@
+name: Project Sync
+
+on:
+  issues:
+    types: [opened, closed]
+  pull_request:
+    types: [opened, reopened, synchronize, closed, review_requested]
+  pull_request_review:
+    types: [submitted]
+  workflow_run:
+    workflows: ["*"]
+    types: [completed]
+
+jobs:
+  # ── Issue opened → Backlog ──────────────────────────────────────────────────
+  issue-opened:
+    name: Issue Opened → Backlog
+    if: github.event_name == 'issues' && github.event.action == 'opened'
+    uses: Vaultody-com/.github/.github/workflows/project-sync-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      target_status: Backlog
+      issue_number: ${{ github.event.issue.number }}
+    secrets:
+      ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+
+  # ── Issue closed → Done ─────────────────────────────────────────────────────
+  issue-closed:
+    name: Issue Closed → Done
+    if: github.event_name == 'issues' && github.event.action == 'closed'
+    uses: Vaultody-com/.github/.github/workflows/project-sync-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      target_status: Done
+      issue_number: ${{ github.event.issue.number }}
+    secrets:
+      ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+
+  # ── PR opened / reopened / synchronize → In Development ────────────────────
+  pr-in-development:
+    name: PR Active → In Development
+    if: >
+      github.event_name == 'pull_request' &&
+      (
+        github.event.action == 'opened' ||
+        github.event.action == 'reopened' ||
+        github.event.action == 'synchronize'
+      )
+    uses: Vaultody-com/.github/.github/workflows/project-sync-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      target_status: In Development
+      issue_number: ${{ github.event.pull_request.number }}
+    secrets:
+      ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+
+  # ── PR review_requested → Code Review ──────────────────────────────────────
+  pr-review-requested:
+    name: PR Review Requested → Code Review
+    if: github.event_name == 'pull_request' && github.event.action == 'review_requested'
+    uses: Vaultody-com/.github/.github/workflows/project-sync-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      target_status: Code Review
+      issue_number: ${{ github.event.pull_request.number }}
+    secrets:
+      ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+
+  # ── PR merged → QA Manual ───────────────────────────────────────────────────
+  pr-merged:
+    name: PR Merged → QA Manual
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true
+    uses: Vaultody-com/.github/.github/workflows/project-sync-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      target_status: QA Manual
+      issue_number: ${{ github.event.pull_request.number }}
+    secrets:
+      ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+
+  # ── Review: changes_requested → In Development ─────────────────────────────
+  review-changes-requested:
+    name: Review Changes Requested → In Development
+    if: >
+      github.event_name == 'pull_request_review' &&
+      github.event.review.state == 'changes_requested'
+    uses: Vaultody-com/.github/.github/workflows/project-sync-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      target_status: In Development
+      issue_number: ${{ github.event.pull_request.number }}
+    secrets:
+      ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+
+  # ── CI success → Verification ───────────────────────────────────────────────
+  ci-success:
+    name: CI Success → Verification
+    if: >
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch
+    uses: Vaultody-com/.github/.github/workflows/project-sync-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      target_status: Verification
+      issue_number: ${{ github.event.workflow_run.pull_requests[0].number }}
+    secrets:
+      ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+
+  # ── CI failure → In Development + label outcome:fail ───────────────────────
+  ci-failure:
+    name: CI Failure → In Development + label
+    if: >
+      github.event_name == 'workflow_run' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Move PR to In Development
+        if: ${{ github.event.workflow_run.pull_requests[0].number != '' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ORG_ADMIN_TOKEN }}
+          script: |
+            const prNumber = context.payload.workflow_run.pull_requests[0]?.number;
+            if (!prNumber) {
+              console.log('No PR associated with this workflow run — skipping');
+              return;
+            }
+
+            // Add outcome:fail label (create it if it doesn't exist)
+            try {
+              await github.rest.issues.addLabels({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                labels: ['outcome:fail']
+              });
+              console.log(`Added label outcome:fail to PR #${prNumber}`);
+            } catch (err) {
+              // If label doesn't exist, create it first
+              if (err.status === 422) {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: 'outcome:fail',
+                  color: 'd73a4a',
+                  description: 'CI pipeline failed'
+                });
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  labels: ['outcome:fail']
+                });
+                console.log(`Created and added label outcome:fail to PR #${prNumber}`);
+              } else {
+                throw err;
+              }
+            }
+
+      - name: Move to In Development via reusable
+        if: ${{ github.event.workflow_run.pull_requests[0].number != '' }}
+        uses: Vaultody-com/.github/.github/workflows/project-sync-reusable.yml@main
+        with:
+          repo: ${{ github.repository }}
+          target_status: In Development
+          issue_number: ${{ github.event.workflow_run.pull_requests[0].number }}
+        secrets:
+          ORG_ADMIN_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
