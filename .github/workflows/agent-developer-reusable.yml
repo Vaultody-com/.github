@@ -67,10 +67,8 @@ jobs:
           ISSUE_DATA=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}")
           ISSUE_TITLE=$(echo "${ISSUE_DATA}" | jq -r '.title')
           ISSUE_BODY=$(echo "${ISSUE_DATA}" | jq -r '.body // ""')
-
           echo "title=${ISSUE_TITLE}" >> "${GITHUB_OUTPUT}"
           echo "ISSUE_TITLE=${ISSUE_TITLE}" >> "${GITHUB_ENV}"
-
           echo "${ISSUE_BODY}" > /tmp/issue-body.txt
           echo "Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
 
@@ -102,11 +100,15 @@ jobs:
             "${ISSUE_NUMBER}" "${ISSUE_TITLE}" "${REPO}" "${FEATURE_BRANCH}" "${BASE_BRANCH}" \
             "${ISSUE_BODY}" "${REPO_TREE}" > /tmp/agent-input.txt
 
+      - name: Build agent prompt file
+        run: |
+          PROMPT=$(cat .agent-system/agent-prompts/developer.md)
+          CONTEXT=$(cat /tmp/agent-input.txt)
+          printf '%s\n\n---\nCONTEXT:\n%s\n' "${PROMPT}" "${CONTEXT}" > /tmp/agent-full-prompt.txt
+
       - name: Run Developer Agent (Claude Code)
         run: |
-          claude -p .agent-system/agent-prompts/developer.md \
-            --input "$(cat /tmp/agent-input.txt)" \
-            --output /tmp/developer-report.txt
+          claude -p "$(cat /tmp/agent-full-prompt.txt)" > /tmp/developer-report.txt 2>&1
           echo "=== Developer Agent Output ==="
           cat /tmp/developer-report.txt
 
