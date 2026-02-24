@@ -108,9 +108,17 @@ jobs:
 
       - name: Run Developer Agent (Claude Code)
         run: |
+          set +e
           claude -p "$(cat /tmp/agent-full-prompt.txt)" > /tmp/developer-report.txt 2>&1
+          CLAUDE_EXIT=$?
+          set -e
           echo "=== Developer Agent Output ==="
           cat /tmp/developer-report.txt
+          echo "=== Claude exit code: ${CLAUDE_EXIT} ==="
+          if [ "${CLAUDE_EXIT}" -ne 0 ]; then
+            echo "Claude Code exited with code ${CLAUDE_EXIT}"
+            exit ${CLAUDE_EXIT}
+          fi
 
       - name: Enforce path boundaries (src/** only)
         run: |
