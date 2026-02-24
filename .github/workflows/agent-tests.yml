@@ -1,0 +1,26 @@
+name: Agent - Tests
+
+on:
+  pull_request:
+    types: [labeled]
+
+jobs:
+  unit-tests:
+    if: github.event.label.name == 'agent:unit-test'
+    uses: Vaultody-com/.github/.github/workflows/agent-tests-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      issue_number: ${{ github.event.pull_request.number }}
+      pr_number: ${{ github.event.pull_request.number }}
+      mode: unit
+    secrets: inherit
+
+  integration-tests:
+    if: github.event.label.name == 'agent:integration-test'
+    uses: Vaultody-com/.github/.github/workflows/agent-tests-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      issue_number: ${{ github.event.pull_request.number }}
+      pr_number: ${{ github.event.pull_request.number }}
+      mode: integration
+    secrets: inherit
