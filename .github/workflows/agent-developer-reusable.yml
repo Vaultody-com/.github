@@ -106,7 +106,7 @@ jobs:
       - name: Run Developer Agent (Claude Code)
         run: |
           set +e
-          claude --model claude-haiku-4-5 --max-turns 15 -p "$(cat /tmp/agent-full-prompt.txt)" > /tmp/developer-report.txt 2>&1
+          claude --dangerously-skip-permissions --model claude-haiku-4-5 --max-turns 15 -p "$(cat /tmp/agent-full-prompt.txt)" > /tmp/developer-report.txt 2>&1
           CLAUDE_EXIT=$?
           set -e
           echo "=== Developer Agent Output ==="
