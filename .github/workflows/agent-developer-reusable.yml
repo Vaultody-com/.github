@@ -25,6 +25,7 @@ jobs:
   developer-agent:
     name: Developer Agent - Implement Issue
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -32,7 +33,6 @@ jobs:
       ISSUE_NUMBER: ${{ inputs.issue_number }}
       BASE_BRANCH: ${{ inputs.base_branch }}
       FEATURE_BRANCH: feature/issue-${{ inputs.issue_number }}
-
     steps:
       - name: Checkout target repository
         uses: actions/checkout@v4
@@ -72,14 +72,11 @@ jobs:
           echo "${ISSUE_BODY}" > /tmp/issue-body.txt
           echo "Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
 
-      - name: Build repository tree
+      - name: Build repository tree (src/ only)
         run: |
-          find . -type f \
-            -not -path './.git/*' \
-            -not -path './node_modules/*' \
-            -not -path './.agent-system/*' \
-            | sort > /tmp/repo-tree.txt
-          echo "Repository tree written"
+          find src/ -type f 2>/dev/null | sort > /tmp/repo-tree.txt || echo "(no src/ directory found)" > /tmp/repo-tree.txt
+          echo "Repository src/ tree written:"
+          cat /tmp/repo-tree.txt
 
       - name: Create or reset feature branch
         run: |
@@ -96,7 +93,7 @@ jobs:
         run: |
           ISSUE_BODY=$(cat /tmp/issue-body.txt)
           REPO_TREE=$(cat /tmp/repo-tree.txt)
-          printf 'ISSUE_NUMBER=%s\nISSUE_TITLE=%s\nREPO=%s\nFEATURE_BRANCH=%s\nBASE_BRANCH=%s\n\nISSUE BODY:\n%s\n\nREPOSITORY FILE TREE:\n%s\n' \
+          printf 'ISSUE_NUMBER=%s\nISSUE_TITLE=%s\nREPO=%s\nFEATURE_BRANCH=%s\nBASE_BRANCH=%s\n\nISSUE BODY:\n%s\n\nREPOSITORY SRC/ FILE TREE:\n%s\n' \
             "${ISSUE_NUMBER}" "${ISSUE_TITLE}" "${REPO}" "${FEATURE_BRANCH}" "${BASE_BRANCH}" \
             "${ISSUE_BODY}" "${REPO_TREE}" > /tmp/agent-input.txt
 
@@ -109,7 +106,7 @@ jobs:
       - name: Run Developer Agent (Claude Code)
         run: |
           set +e
-          claude -p "$(cat /tmp/agent-full-prompt.txt)" > /tmp/developer-report.txt 2>&1
+          claude --model claude-haiku-4-5 --max-turns 15 -p "$(cat /tmp/agent-full-prompt.txt)" > /tmp/developer-report.txt 2>&1
           CLAUDE_EXIT=$?
           set -e
           echo "=== Developer Agent Output ==="
