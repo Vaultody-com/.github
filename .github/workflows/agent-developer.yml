@@ -1,0 +1,14 @@
+name: Agent - Developer
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  developer:
+    if: github.event.label.name == 'agent:developer'
+    uses: Vaultody-com/.github/.github/workflows/agent-developer-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      issue_number: ${{ github.event.issue.number }}
+    secrets: inherit
