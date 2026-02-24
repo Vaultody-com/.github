@@ -29,6 +29,7 @@ jobs:
   test-agent:
     name: Test Agent — ${{ inputs.mode }} tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -37,7 +38,6 @@ jobs:
       PR_NUMBER: ${{ inputs.pr_number }}
       MODE: ${{ inputs.mode }}
       FEATURE_BRANCH: feature/issue-${{ inputs.issue_number }}
-
     steps:
       - name: Validate mode input
         run: |
@@ -103,9 +103,14 @@ jobs:
           printf '%s\n\n---\nCONTEXT:\nISSUE_NUMBER=%s\nISSUE_TITLE=%s\nREPO=%s\nFEATURE_BRANCH=%s\nPR_NUMBER=%s\nMODE=unit\n\nISSUE BODY:\n%s\n\nCHANGED SOURCE FILES:\n%s\n' \
             "${PROMPT}" "${ISSUE_NUMBER}" "${ISSUE_TITLE}" "${REPO}" "${FEATURE_BRANCH}" "${PR_NUMBER}" \
             "${ISSUE_BODY}" "${CHANGED_FILES}" > /tmp/unit-full-prompt.txt
-          claude -p "$(cat /tmp/unit-full-prompt.txt)" > /tmp/test-report.txt 2>&1
+          set +e
+          claude --model claude-haiku-4-5 --max-turns 15 -p "$(cat /tmp/unit-full-prompt.txt)" > /tmp/test-report.txt 2>&1
+          CLAUDE_EXIT=$?
+          set -e
           echo "=== Unit Test Agent Output ==="
           cat /tmp/test-report.txt
+          echo "=== Claude exit code: ${CLAUDE_EXIT} ==="
+          if [ "${CLAUDE_EXIT}" -ne 0 ]; then exit ${CLAUDE_EXIT}; fi
 
       - name: Build integration test agent input and run (Claude Code)
         if: inputs.mode == 'integration'
@@ -116,9 +121,14 @@ jobs:
           printf '%s\n\n---\nCONTEXT:\nISSUE_NUMBER=%s\nISSUE_TITLE=%s\nREPO=%s\nFEATURE_BRANCH=%s\nPR_NUMBER=%s\nMODE=integration\n\nISSUE BODY:\n%s\n\nCHANGED SOURCE FILES:\n%s\n' \
             "${PROMPT}" "${ISSUE_NUMBER}" "${ISSUE_TITLE}" "${REPO}" "${FEATURE_BRANCH}" "${PR_NUMBER}" \
             "${ISSUE_BODY}" "${CHANGED_FILES}" > /tmp/integration-full-prompt.txt
-          claude -p "$(cat /tmp/integration-full-prompt.txt)" > /tmp/test-report.txt 2>&1
+          set +e
+          claude --model claude-haiku-4-5 --max-turns 15 -p "$(cat /tmp/integration-full-prompt.txt)" > /tmp/test-report.txt 2>&1
+          CLAUDE_EXIT=$?
+          set -e
           echo "=== Integration Test Agent Output ==="
           cat /tmp/test-report.txt
+          echo "=== Claude exit code: ${CLAUDE_EXIT} ==="
+          if [ "${CLAUDE_EXIT}" -ne 0 ]; then exit ${CLAUDE_EXIT}; fi
 
       - name: Enforce test path boundaries
         run: |
