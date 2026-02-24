@@ -23,7 +23,7 @@ on:
 
 jobs:
   developer-agent:
-    name: Developer Agent — Implement Issue
+    name: Developer Agent - Implement Issue
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
@@ -64,9 +64,6 @@ jobs:
       - name: Retrieve issue details
         id: issue
         run: |
-          REPO_OWNER=$(echo "${REPO}" | cut -d'/' -f1)
-          REPO_NAME=$(echo "${REPO}" | cut -d'/' -f2)
-
           ISSUE_DATA=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}")
           ISSUE_TITLE=$(echo "${ISSUE_DATA}" | jq -r '.title')
           ISSUE_BODY=$(echo "${ISSUE_DATA}" | jq -r '.body // ""')
@@ -74,7 +71,6 @@ jobs:
           echo "title=${ISSUE_TITLE}" >> "${GITHUB_OUTPUT}"
           echo "ISSUE_TITLE=${ISSUE_TITLE}" >> "${GITHUB_ENV}"
 
-          # Write full issue body to file to avoid shell escaping issues
           echo "${ISSUE_BODY}" > /tmp/issue-body.txt
           echo "Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
 
@@ -85,7 +81,7 @@ jobs:
             -not -path './node_modules/*' \
             -not -path './.agent-system/*' \
             | sort > /tmp/repo-tree.txt
-          echo "Repository tree written ($(wc -l < /tmp/repo-tree.txt) files)"
+          echo "Repository tree written"
 
       - name: Create or reset feature branch
         run: |
@@ -98,25 +94,19 @@ jobs:
             git checkout -b "${FEATURE_BRANCH}"
           fi
 
-      - name: Run Developer Agent (Claude Code)
+      - name: Build agent input file
         run: |
           ISSUE_BODY=$(cat /tmp/issue-body.txt)
           REPO_TREE=$(cat /tmp/repo-tree.txt)
+          printf 'ISSUE_NUMBER=%s\nISSUE_TITLE=%s\nREPO=%s\nFEATURE_BRANCH=%s\nBASE_BRANCH=%s\n\nISSUE BODY:\n%s\n\nREPOSITORY FILE TREE:\n%s\n' \
+            "${ISSUE_NUMBER}" "${ISSUE_TITLE}" "${REPO}" "${FEATURE_BRANCH}" "${BASE_BRANCH}" \
+            "${ISSUE_BODY}" "${REPO_TREE}" > /tmp/agent-input.txt
 
+      - name: Run Developer Agent (Claude Code)
+        run: |
           claude -p .agent-system/agent-prompts/developer.md \
-            --input "ISSUE_NUMBER=${ISSUE_NUMBER}
-ISSUE_TITLE=${ISSUE_TITLE}
-REPO=${REPO}
-FEATURE_BRANCH=${FEATURE_BRANCH}
-BASE_BRANCH=${BASE_BRANCH}
-
-ISSUE BODY:
-${ISSUE_BODY}
-
-REPOSITORY FILE TREE:
-${REPO_TREE}" \
+            --input "$(cat /tmp/agent-input.txt)" \
             --output /tmp/developer-report.txt
-
           echo "=== Developer Agent Output ==="
           cat /tmp/developer-report.txt
 
@@ -134,7 +124,7 @@ ${REPO_TREE}" \
         run: |
           git add src/
           if git diff --cached --quiet; then
-            echo "No changes to commit — agent made no modifications"
+            echo "No changes to commit - agent made no modifications"
             exit 1
           fi
           git commit -m "feat(#${ISSUE_NUMBER}): implement ${ISSUE_TITLE}"
@@ -143,22 +133,19 @@ ${REPO_TREE}" \
       - name: Open Pull Request
         id: pr
         run: |
-          DEVELOPER_REPORT=$(cat /tmp/developer-report.txt)
           EXISTING_PR=$(gh pr list --repo "${REPO}" --head "${FEATURE_BRANCH}" --json number --jq '.[0].number' 2>/dev/null)
           if [ -n "${EXISTING_PR}" ]; then
             echo "PR already exists: #${EXISTING_PR}"
             echo "pr_number=${EXISTING_PR}" >> "${GITHUB_OUTPUT}"
           else
+            printf 'Fixes #%s\n\n## Developer Agent Report\n\n%s' \
+              "${ISSUE_NUMBER}" "$(cat /tmp/developer-report.txt)" > /tmp/pr-body.txt
             PR_URL=$(gh pr create \
               --repo "${REPO}" \
               --head "${FEATURE_BRANCH}" \
               --base "${BASE_BRANCH}" \
               --title "Implement issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}" \
-              --body "Fixes #${ISSUE_NUMBER}
-
-## Developer Agent Report
-
-$(cat /tmp/developer-report.txt)")
+              --body-file /tmp/pr-body.txt)
             echo "PR created: ${PR_URL}"
             PR_NUMBER=$(echo "${PR_URL}" | grep -oE '[0-9]+$')
             echo "pr_number=${PR_NUMBER}" >> "${GITHUB_OUTPUT}"
@@ -168,9 +155,8 @@ $(cat /tmp/developer-report.txt)")
         run: |
           PR_NUMBER=${{ steps.pr.outputs.pr_number }}
           if [ -n "${PR_NUMBER}" ]; then
+            printf '## Developer Agent Report\n\n%s' "$(cat /tmp/developer-report.txt)" > /tmp/comment-body.txt
             gh pr comment "${PR_NUMBER}" \
               --repo "${REPO}" \
-              --body "## Developer Agent Report
-
-$(cat /tmp/developer-report.txt)"
+              --body-file /tmp/comment-body.txt
           fi
