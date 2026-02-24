@@ -1,0 +1,46 @@
+name: Agent - Validation
+
+on:
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [closed, labeled]
+
+jobs:
+  review:
+    if: >
+      github.event_name == 'pull_request_review' &&
+      github.event.review.state == 'changes_requested'
+    uses: Vaultody-com/.github/.github/workflows/agent-validation-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      issue_number: ${{ github.event.pull_request.number }}
+      pr_number: ${{ github.event.pull_request.number }}
+      mode: review
+    secrets: inherit
+
+  qa:
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true
+    uses: Vaultody-com/.github/.github/workflows/agent-validation-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      issue_number: ${{ github.event.pull_request.number }}
+      pr_number: ${{ github.event.pull_request.number }}
+      mode: qa
+    secrets: inherit
+
+  performance:
+    if: >
+      github.event_name == 'pull_request' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'agent:performance'
+    uses: Vaultody-com/.github/.github/workflows/agent-validation-reusable.yml@main
+    with:
+      repo: ${{ github.repository }}
+      issue_number: ${{ github.event.pull_request.number }}
+      pr_number: ${{ github.event.pull_request.number }}
+      mode: perf
+    secrets: inherit
