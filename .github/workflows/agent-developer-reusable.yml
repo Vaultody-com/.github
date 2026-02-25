@@ -34,9 +34,6 @@ jobs:
       BASE_BRANCH: ${{ inputs.base_branch }}
       FEATURE_BRANCH: feature/issue-${{ inputs.issue_number }}
     steps:
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
-
       - name: Retrieve issue details
         id: issue
         run: |
@@ -101,40 +98,75 @@ jobs:
             git checkout -b "${FEATURE_BRANCH}"
           fi
 
-      - name: Build agent task file
-        run: |
-          PROMPT=$(cat .agent-system/agent-prompts/developer.md)
-          ISSUE_BODY=$(cat /tmp/issue-body.txt)
-          REPO_TREE=$(cat /tmp/repo-tree.txt)
-          SRC_CONTENTS=$(cat /tmp/src-contents.txt)
-          printf '%s\n' "${PROMPT}" > /tmp/agent-task.txt
-          printf '\n---\nCONTEXT:\n' >> /tmp/agent-task.txt
-          printf 'ISSUE_NUMBER=%s\n' "${ISSUE_NUMBER}" >> /tmp/agent-task.txt
-          printf 'ISSUE_TITLE=%s\n' "${ISSUE_TITLE}" >> /tmp/agent-task.txt
-          printf 'REPO=%s\n' "${REPO}" >> /tmp/agent-task.txt
-          printf 'FEATURE_BRANCH=%s\n' "${FEATURE_BRANCH}" >> /tmp/agent-task.txt
-          printf 'BASE_BRANCH=%s\n' "${BASE_BRANCH}" >> /tmp/agent-task.txt
-          printf '\nISSUE BODY:\n%s\n' "${ISSUE_BODY}" >> /tmp/agent-task.txt
-          printf '\nREPOSITORY SRC/ FILE TREE:\n%s\n' "${REPO_TREE}" >> /tmp/agent-task.txt
-          printf '\nSRC FILE CONTENTS:\n%s\n' "${SRC_CONTENTS}" >> /tmp/agent-task.txt
-          echo "Task file size: $(wc -c < /tmp/agent-task.txt) bytes"
+      - name: Install Anthropic SDK
+        run: npm install -g @anthropic-ai/sdk
 
-      - name: Run Developer Agent (Claude Code)
+      - name: Write agent script
         run: |
-          set +e
-          claude --dangerously-skip-permissions --model claude-sonnet-4-5 --max-turns 20 \
-            --allowedTools "Bash,Write,Edit,Read,MultiEdit" \
-            -p "$(cat /tmp/agent-task.txt)" \
-            > /tmp/developer-report.txt 2>&1
-          CLAUDE_EXIT=$?
-          set -e
-          echo "=== Developer Agent Output ==="
-          cat /tmp/developer-report.txt
-          echo "=== Claude exit code: ${CLAUDE_EXIT} ==="
-          if [ "${CLAUDE_EXIT}" -ne 0 ]; then
-            echo "Claude Code exited with code ${CLAUDE_EXIT}"
-            exit ${CLAUDE_EXIT}
-          fi
+          cat > /tmp/agent.js << 'AGENTEOF'
+          const Anthropic = require('/usr/local/lib/node_modules/@anthropic-ai/sdk');
+          const fs = require('fs');
+          const path = require('path');
+
+          async function main() {
+            const client = new Anthropic.default();
+            const issueNumber = process.env.ISSUE_NUMBER;
+            const issueTitle = process.env.ISSUE_TITLE;
+            const issueBody = fs.readFileSync('/tmp/issue-body.txt', 'utf8');
+            const srcContents = fs.readFileSync('/tmp/src-contents.txt', 'utf8');
+            const repoTree = fs.readFileSync('/tmp/repo-tree.txt', 'utf8');
+            const devPrompt = fs.readFileSync('.agent-system/agent-prompts/developer.md', 'utf8');
+
+            const prompt = devPrompt + '\n\n---\n' +
+              'ISSUE #' + issueNumber + ': ' + issueTitle + '\n\n' +
+              issueBody + '\n\n' +
+              'REPOSITORY SRC FILES:\n' + repoTree + '\n\n' +
+              'SRC FILE CONTENTS:\n' + srcContents + '\n\n' +
+              'IMPORTANT: Respond with the complete new content for each file that needs to change.\n' +
+              'Use this EXACT format for each file:\n' +
+              'FILE: src/path/to/file.ts\n' +
+              '```\n' +
+              '<complete new file content here>\n' +
+              '```\n' +
+              'Only include files under src/ that need to be modified.';
+
+            const response = await client.messages.create({
+              model: 'claude-sonnet-4-5',
+              max_tokens: 4096,
+              messages: [{ role: 'user', content: prompt }]
+            });
+
+            const output = response.content[0].text;
+            console.log('=== Claude Response ===');
+            console.log(output);
+
+            // Parse FILE: blocks and write them
+            const fileRegex = /FILE: (src\/[^\n]+)\n```(?:\w+)?\n([\s\S]*?)```/g;
+            let match;
+            let filesWritten = 0;
+            while ((match = fileRegex.exec(output)) !== null) {
+              const filePath = match[1].trim();
+              const content = match[2];
+              const dir = path.dirname(filePath);
+              if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+              fs.writeFileSync(filePath, content);
+              console.log('Written: ' + filePath);
+              filesWritten++;
+            }
+            console.log('Files written: ' + filesWritten);
+            if (filesWritten === 0) {
+              console.error('ERROR: No files were written');
+              process.exit(1);
+            }
+            fs.writeFileSync('/tmp/developer-report.txt', output);
+          }
+
+          main().catch(e => { console.error(e); process.exit(1); });
+          AGENTEOF
+          echo 'Agent script written'
+
+      - name: Run Developer Agent
+        run: node /tmp/agent.js
 
       - name: Show git status after Claude
         run: |
