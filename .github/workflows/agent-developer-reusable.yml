@@ -122,7 +122,10 @@ jobs:
       - name: Run Developer Agent (Claude Code)
         run: |
           set +e
-          cat /tmp/agent-task.txt | claude --dangerously-skip-permissions --model claude-sonnet-4-5 --max-turns 20 > /tmp/developer-report.txt 2>&1
+          claude --dangerously-skip-permissions --model claude-sonnet-4-5 --max-turns 20 \
+            --allowedTools "Bash,Write,Edit,Read,MultiEdit" \
+            -p "$(cat /tmp/agent-task.txt)" \
+            > /tmp/developer-report.txt 2>&1
           CLAUDE_EXIT=$?
           set -e
           echo "=== Developer Agent Output ==="
