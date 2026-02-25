@@ -88,7 +88,7 @@ jobs:
               echo "" >> /tmp/src-contents.txt
             fi
           done < /tmp/repo-tree.txt
-          echo "Src contents file size: $(wc -c < /tmp/src-contents.txt) bytes"
+          echo "Src contents size: $(wc -c < /tmp/src-contents.txt) bytes"
 
       - name: Create or reset feature branch
         run: |
@@ -101,27 +101,38 @@ jobs:
             git checkout -b "${FEATURE_BRANCH}"
           fi
 
-      - name: Build agent input file
+      - name: Build agent task file
         run: |
           ISSUE_BODY=$(cat /tmp/issue-body.txt)
           REPO_TREE=$(cat /tmp/repo-tree.txt)
           SRC_CONTENTS=$(cat /tmp/src-contents.txt)
-          printf 'ISSUE_NUMBER=%s\nISSUE_TITLE=%s\nREPO=%s\nFEATURE_BRANCH=%s\nBASE_BRANCH=%s\n\nISSUE BODY:\n%s\n\nREPOSITORY SRC/ FILE TREE:\n%s\n\nSRC FILE CONTENTS:\n%s\n' \
-            "${ISSUE_NUMBER}" "${ISSUE_TITLE}" "${REPO}" "${FEATURE_BRANCH}" "${BASE_BRANCH}" \
-            "${ISSUE_BODY}" "${REPO_TREE}" "${SRC_CONTENTS}" > /tmp/agent-input.txt
-          echo "Agent input size: $(wc -c < /tmp/agent-input.txt) bytes"
-
-      - name: Build agent prompt file
-        run: |
           PROMPT=$(cat .agent-system/agent-prompts/developer.md)
-          CONTEXT=$(cat /tmp/agent-input.txt)
-          printf '%s\n\n---\nCONTEXT:\n%s\n' "${PROMPT}" "${CONTEXT}" > /tmp/agent-full-prompt.txt
-          echo "Full prompt size: $(wc -c < /tmp/agent-full-prompt.txt) bytes"
+          cat > /tmp/agent-task.txt << TASKEOF
+${PROMPT}
+
+---
+CONTEXT:
+ISSUE_NUMBER=${ISSUE_NUMBER}
+ISSUE_TITLE=${ISSUE_TITLE}
+REPO=${REPO}
+FEATURE_BRANCH=${FEATURE_BRANCH}
+BASE_BRANCH=${BASE_BRANCH}
+
+ISSUE BODY:
+${ISSUE_BODY}
+
+REPOSITORY SRC/ FILE TREE:
+${REPO_TREE}
+
+SRC FILE CONTENTS:
+${SRC_CONTENTS}
+TASKEOF
+          echo "Task file size: $(wc -c < /tmp/agent-task.txt) bytes"
 
       - name: Run Developer Agent (Claude Code)
         run: |
           set +e
-          claude --dangerously-skip-permissions --model claude-sonnet-4-5 --max-turns 20 -p "$(cat /tmp/agent-full-prompt.txt)" > /tmp/developer-report.txt 2>&1
+          cat /tmp/agent-task.txt | claude --dangerously-skip-permissions --model claude-sonnet-4-5 --max-turns 20 > /tmp/developer-report.txt 2>&1
           CLAUDE_EXIT=$?
           set -e
           echo "=== Developer Agent Output ==="
@@ -131,6 +142,11 @@ jobs:
             echo "Claude Code exited with code ${CLAUDE_EXIT}"
             exit ${CLAUDE_EXIT}
           fi
+
+      - name: Show git status after Claude
+        run: |
+          git status
+          git diff --stat
 
       - name: Enforce path boundaries (src/** only)
         run: |
