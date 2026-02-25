@@ -25,7 +25,7 @@ jobs:
   developer-agent:
     name: Developer Agent - Implement Issue
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -34,6 +34,20 @@ jobs:
       BASE_BRANCH: ${{ inputs.base_branch }}
       FEATURE_BRANCH: feature/issue-${{ inputs.issue_number }}
     steps:
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Retrieve issue details
+        id: issue
+        run: |
+          ISSUE_DATA=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}")
+          ISSUE_TITLE=$(echo "${ISSUE_DATA}" | jq -r '.title')
+          ISSUE_BODY=$(echo "${ISSUE_DATA}" | jq -r '.body // ""')
+          echo "title=${ISSUE_TITLE}" >> "${GITHUB_OUTPUT}"
+          echo "ISSUE_TITLE=${ISSUE_TITLE}" >> "${GITHUB_ENV}"
+          echo "${ISSUE_BODY}" > /tmp/issue-body.txt
+          echo "Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
+
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
@@ -58,25 +72,23 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Claude Code CLI
-        run: npm install -g @anthropic-ai/claude-code
-
-      - name: Retrieve issue details
-        id: issue
-        run: |
-          ISSUE_DATA=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}")
-          ISSUE_TITLE=$(echo "${ISSUE_DATA}" | jq -r '.title')
-          ISSUE_BODY=$(echo "${ISSUE_DATA}" | jq -r '.body // ""')
-          echo "title=${ISSUE_TITLE}" >> "${GITHUB_OUTPUT}"
-          echo "ISSUE_TITLE=${ISSUE_TITLE}" >> "${GITHUB_ENV}"
-          echo "${ISSUE_BODY}" > /tmp/issue-body.txt
-          echo "Issue #${ISSUE_NUMBER}: ${ISSUE_TITLE}"
-
       - name: Build repository tree (src/ only)
         run: |
           find src/ -type f 2>/dev/null | sort > /tmp/repo-tree.txt || echo "(no src/ directory found)" > /tmp/repo-tree.txt
           echo "Repository src/ tree written:"
           cat /tmp/repo-tree.txt
+
+      - name: Build src file contents
+        run: |
+          echo "" > /tmp/src-contents.txt
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              echo "=== ${file} ===" >> /tmp/src-contents.txt
+              cat "${file}" >> /tmp/src-contents.txt
+              echo "" >> /tmp/src-contents.txt
+            fi
+          done < /tmp/repo-tree.txt
+          echo "Src contents file size: $(wc -c < /tmp/src-contents.txt) bytes"
 
       - name: Create or reset feature branch
         run: |
@@ -93,20 +105,23 @@ jobs:
         run: |
           ISSUE_BODY=$(cat /tmp/issue-body.txt)
           REPO_TREE=$(cat /tmp/repo-tree.txt)
-          printf 'ISSUE_NUMBER=%s\nISSUE_TITLE=%s\nREPO=%s\nFEATURE_BRANCH=%s\nBASE_BRANCH=%s\n\nISSUE BODY:\n%s\n\nREPOSITORY SRC/ FILE TREE:\n%s\n' \
+          SRC_CONTENTS=$(cat /tmp/src-contents.txt)
+          printf 'ISSUE_NUMBER=%s\nISSUE_TITLE=%s\nREPO=%s\nFEATURE_BRANCH=%s\nBASE_BRANCH=%s\n\nISSUE BODY:\n%s\n\nREPOSITORY SRC/ FILE TREE:\n%s\n\nSRC FILE CONTENTS:\n%s\n' \
             "${ISSUE_NUMBER}" "${ISSUE_TITLE}" "${REPO}" "${FEATURE_BRANCH}" "${BASE_BRANCH}" \
-            "${ISSUE_BODY}" "${REPO_TREE}" > /tmp/agent-input.txt
+            "${ISSUE_BODY}" "${REPO_TREE}" "${SRC_CONTENTS}" > /tmp/agent-input.txt
+          echo "Agent input size: $(wc -c < /tmp/agent-input.txt) bytes"
 
       - name: Build agent prompt file
         run: |
           PROMPT=$(cat .agent-system/agent-prompts/developer.md)
           CONTEXT=$(cat /tmp/agent-input.txt)
           printf '%s\n\n---\nCONTEXT:\n%s\n' "${PROMPT}" "${CONTEXT}" > /tmp/agent-full-prompt.txt
+          echo "Full prompt size: $(wc -c < /tmp/agent-full-prompt.txt) bytes"
 
       - name: Run Developer Agent (Claude Code)
         run: |
           set +e
-          claude --dangerously-skip-permissions --model claude-haiku-4-5 --max-turns 15 -p "$(cat /tmp/agent-full-prompt.txt)" > /tmp/developer-report.txt 2>&1
+          claude --dangerously-skip-permissions --model claude-sonnet-4-5 --max-turns 20 -p "$(cat /tmp/agent-full-prompt.txt)" > /tmp/developer-report.txt 2>&1
           CLAUDE_EXIT=$?
           set -e
           echo "=== Developer Agent Output ==="
