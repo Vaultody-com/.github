@@ -103,30 +103,20 @@ jobs:
 
       - name: Build agent task file
         run: |
+          PROMPT=$(cat .agent-system/agent-prompts/developer.md)
           ISSUE_BODY=$(cat /tmp/issue-body.txt)
           REPO_TREE=$(cat /tmp/repo-tree.txt)
           SRC_CONTENTS=$(cat /tmp/src-contents.txt)
-          PROMPT=$(cat .agent-system/agent-prompts/developer.md)
-          cat > /tmp/agent-task.txt << TASKEOF
-${PROMPT}
-
----
-CONTEXT:
-ISSUE_NUMBER=${ISSUE_NUMBER}
-ISSUE_TITLE=${ISSUE_TITLE}
-REPO=${REPO}
-FEATURE_BRANCH=${FEATURE_BRANCH}
-BASE_BRANCH=${BASE_BRANCH}
-
-ISSUE BODY:
-${ISSUE_BODY}
-
-REPOSITORY SRC/ FILE TREE:
-${REPO_TREE}
-
-SRC FILE CONTENTS:
-${SRC_CONTENTS}
-TASKEOF
+          printf '%s\n' "${PROMPT}" > /tmp/agent-task.txt
+          printf '\n---\nCONTEXT:\n' >> /tmp/agent-task.txt
+          printf 'ISSUE_NUMBER=%s\n' "${ISSUE_NUMBER}" >> /tmp/agent-task.txt
+          printf 'ISSUE_TITLE=%s\n' "${ISSUE_TITLE}" >> /tmp/agent-task.txt
+          printf 'REPO=%s\n' "${REPO}" >> /tmp/agent-task.txt
+          printf 'FEATURE_BRANCH=%s\n' "${FEATURE_BRANCH}" >> /tmp/agent-task.txt
+          printf 'BASE_BRANCH=%s\n' "${BASE_BRANCH}" >> /tmp/agent-task.txt
+          printf '\nISSUE BODY:\n%s\n' "${ISSUE_BODY}" >> /tmp/agent-task.txt
+          printf '\nREPOSITORY SRC/ FILE TREE:\n%s\n' "${REPO_TREE}" >> /tmp/agent-task.txt
+          printf '\nSRC FILE CONTENTS:\n%s\n' "${SRC_CONTENTS}" >> /tmp/agent-task.txt
           echo "Task file size: $(wc -c < /tmp/agent-task.txt) bytes"
 
       - name: Run Developer Agent (Claude Code)
